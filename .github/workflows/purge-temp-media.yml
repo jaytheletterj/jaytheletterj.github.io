@@ -1,0 +1,41 @@
+# Removes temporary public videos (media/) from the site AND from git history.
+# Files are named media/<purge-after-epoch>-<slug>.mp4 by the postiz-schedule skill.
+# Any media file whose epoch has passed (or has no epoch) is purged with git filter-repo
+# and the branch is force-pushed. Runs hourly; can also be run by hand.
+name: purge temp media
+on:
+  schedule: [{ cron: "17 * * * *" }]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: { group: purge-temp-media, cancel-in-progress: false }
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Find expired media in tree or history
+        id: find
+        run: |
+          set -eu
+          now=$(date +%s)
+          : > expired.txt
+          git log --all --format= --name-only -- media | sort -u | while read -r f; do
+            [ -n "$f" ] || continue
+            t=$(basename "$f" | cut -d- -f1)
+            case "$t" in ''|*[!0-9]*) t=0 ;; esac
+            if [ "$now" -gt "$t" ]; then echo "$f" >> expired.txt; fi
+          done
+          echo "expired:"; cat expired.txt
+          echo "count=$(wc -l < expired.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+      - name: Purge from history and force-push
+        if: steps.find.outputs.count != '0'
+        run: |
+          set -eu
+          pip install -q git-filter-repo
+          mv expired.txt /tmp/expired.txt
+          git filter-repo --force --invert-paths --paths-from-file /tmp/expired.txt
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push --force origin HEAD:${{ github.ref_name }}
+          git log --oneline -5
